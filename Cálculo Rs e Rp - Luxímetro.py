@@ -1,0 +1,141 @@
+import math
+
+# 1. Dados do LDR
+# Representados como um dicionário para fácil acesso pela luminosidade
+ldr_lux_data = {
+    0: 1000000, # 0 Lux = 1 Megaohm
+    149: 4700, 170: 4470, 200: 4100, 220: 3990, 240: 3760, 260: 3510,
+    280: 3380, 300: 3220, 350: 2800, 400: 2740, 450: 2610, 550: 2260,
+    600: 2110, 700: 2020, 800: 1910, 900: 1650, 1000: 1500, 1200: 1460,
+    1400: 1300, 1600: 1160, 2000: 1050
+}
+
+# Lista ordenada de LUX para a parte final de exibição dos resultados
+sorted_lux_values = sorted(ldr_lux_data.keys())
+
+Vcc = 12.0 # Volts - Tensão de alimentação
+
+# 2. Função para calcular V_out (sempre a mesma)
+def calculate_vout(R_LDR, Rs, Rp, Vcc):
+    Req = 0.0
+    if Rp == float('inf'): # Caso Rp não esteja presente (LDR original)
+        Req = R_LDR
+    else:
+        # Resistência equivalente de LDR em paralelo com Rp
+        if (R_LDR + Rp) == 0:
+            Req = 0.0
+        else:
+            Req = (R_LDR * Rp) / (R_LDR + Rp)
+
+    # V_out do divisor de tensão
+    if (Rs + Req) == 0:
+        return None # Retorna None se houver divisão por zero (erro)
+    else:
+        return Vcc * (Req / (Rs + Req))
+
+# 3. Definição dos três pontos de linearização
+lux_point1, R_LDR_point1 = 0, ldr_lux_data[0] # 0 Lux -> 1 Megaohm
+lux_point2, R_LDR_point2 = 1000, ldr_lux_data[1000] # 1000 Lux -> 1500 Ohms
+lux_point3, R_LDR_point3 = 2000, ldr_lux_data[2000] # 2000 Lux -> 1050 Ohms
+
+# 4. Função para gerar valores de resistores da série E12 dentro de uma faixa
+def Escolha_resistores_padrões(min_val, max_val):
+    e12_base_values = [10, 12, 15, 18, 22, 27, 33, 39, 47, 56, 68, 82]
+    multipliers = [1, 10, 100, 1000, 10000, 100000, 1000000] # Até 1 Mega
+    resistor_values = []
+    for m in multipliers:
+        for e in e12_base_values:
+            val = m * e
+            if min_val <= val <= max_val:
+                resistor_values.append(val)
+    return sorted(list(set(resistor_values))) # Garante valores únicos e ordenados
+
+
+# 5. Função de Otimização Principal
+def Encontrar_Rs_Rp(Vcc, R_LDR_p1, R_LDR_p2, R_LDR_p3, lux_p1, lux_p2, lux_p3):
+    erro_linearidade = float('inf') # O menor custo encontrado (erro de linearidade)
+    optimal_Rs = 0
+    optimal_Rp = 0
+
+    # Definindo faixas de busca para Rs e Rp usando valores da série E12
+    # Rs: de 1 kOhm a 10 MOhm (para cobrir bem o 1M Ohm do LDR no escuro)
+    # Rp: de 100 Ohm a 100 kOhm (para ter efeito significativo no LDR)
+    rs_values = Escolha_resistores_padrões(1000, 10000000) # De 1k a 10M
+    rp_values = Escolha_resistores_padrões(100, 100000) # De 100 a 100k
+
+    # --- Critérios de Faixa de Vout Desejada ---
+    # Vout_range = Vout(0 Lux) - Vout(2000 Lux)
+    target_min_output_range_V = 0.100 # Mínimo 100mV
+    target_max_output_range_V = 0.200 # Máximo 200mV
+    
+    # Limites absolutos para Vout 
+    min_abs_vout = 0.080 # 80mV
+    max_abs_vout = 0.250 # 250mV
+
+    for Rs_test in rs_values:
+        for Rp_test in rp_values:
+            # Calcula Vout para os três pontos
+            Vout1 = calculate_vout(R_LDR_p1, Rs_test, Rp_test, Vcc)
+            Vout2 = calculate_vout(R_LDR_p2, Rs_test, Rp_test, Vcc)
+            Vout3 = calculate_vout(R_LDR_p3, Rs_test, Rp_test, Vcc)
+
+            # Calcula a variação total de Vout para esta combinação
+            actual_output_range = abs(Vout1 - Vout3)
+
+            # Filtra soluções onde Vout está fora dos limites absolutos ou a faixa está fora do alvo
+            if (Vout1 < min_abs_vout or Vout3 < min_abs_vout or # Se Vout for muito baixo
+                Vout1 > max_abs_vout or Vout3 > max_abs_vout or # Se Vout for muito alto
+                actual_output_range < target_min_output_range_V or # Se a faixa de Vout for muito pequena
+                actual_output_range > target_max_output_range_V): # Se a faixa de Vout for muito grande
+                continue
+
+            # Calcula as inclinações dos dois segmentos para verificar a linearidade
+            
+            slope1 = (Vout2 - Vout1) / (lux_p2 - lux_p1)
+            slope2 = (Vout3 - Vout2) / (lux_p3 - lux_p2)
+
+            teste = abs(slope1 - slope2) 
+
+            # Atualiza a melhor solução encontrada
+            if teste < erro_linearidade:
+                erro_linearidade = teste
+                optimal_Rs = Rs_test
+                optimal_Rp = Rp_test
+                
+    return optimal_Rs, optimal_Rp, erro_linearidade
+
+# --- Execução Principal ---
+optimal_Rs, optimal_Rp, erro_linearidade = Encontrar_Rs_Rp(Vcc, R_LDR_point1, R_LDR_point2, R_LDR_point3,
+                                                                                lux_point1, lux_point2, lux_point3)
+
+# Calcula as Vouts nos pontos de linearização com os Rs e Rp ótimos para exibição
+Vout1_opt = calculate_vout(R_LDR_point1, optimal_Rs, optimal_Rp, Vcc)
+Vout2_opt = calculate_vout(R_LDR_point2, optimal_Rs, optimal_Rp, Vcc)
+Vout3_opt = calculate_vout(R_LDR_point3, optimal_Rs, optimal_Rp, Vcc)
+
+actual_range_opt = abs(Vout1_opt - Vout3_opt)
+
+# --- Impressão dos Resultados ---
+print("--- Resultados da Otimização do LDR ---")
+
+print(f"Tensão de Alimentação (Vcc): {Vcc} Volts")
+print(f"Resistor Série Ótimo (Rs): {optimal_Rs} Ohms")
+print(f"Resistor Paralelo Ótimo (Rp): {optimal_Rp} Ohms")
+print(f"Erro Final de Linearidade (Absoluto): {erro_linearidade:.2e}")
+
+print("\n--- Valores de Vout nos Pontos de Linearização ---")
+print(f"Vout em 0 Lux (R_LDR=1MΩ): {Vout1_opt:.4f} V ({Vout1_opt*1000:.2f} mV)")
+print(f"Vout em 1000 Lux (R_LDR=1.5kΩ): {Vout2_opt:.4f} V ({Vout2_opt*1000:.2f} mV)")
+print(f"Vout em 2000 Lux (R_LDR=1.05kΩ): {Vout3_opt:.4f} V ({Vout3_opt*1000:.2f} mV)")
+
+print("\n--- Saídas Estimadas para Outros Pontos de Lux (Com Rs e Rp Ótimos) ---")
+# Calcula e imprime Vout para todos os pontos da tabela original com os valores ótimos
+for lux in sorted_lux_values:
+    ldr_res = ldr_lux_data[lux]
+    vout_estimated = calculate_vout(ldr_res, optimal_Rs, optimal_Rp, Vcc)
+    if vout_estimated is not None:
+        #print(f"Lux: {lux:<5} | LDR Res: {ldr_res:<7} Ohms | Vout: {vout_estimated:.4f} V ({vout_estimated*1000:.2f} mV)")
+        print(f"{vout_estimated:,4f}")
+        
+    else:
+        print(f"Lux: {lux:<5} | LDR Res: {ldr_res:<7} Ohms | Vout: N/A (Erro de cálculo)")
